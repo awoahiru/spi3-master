@@ -484,6 +484,27 @@ function startQuiz(mode, catId) {
   renderQuestion();
 }
 
+/* 右上の時計型インジケータ（書籍P.21準拠）:
+   外周リング＝テスト全体の制限時間（時計回りに進む）
+   内側リング＝必要な設問数に対する回答数 */
+function tcClockSVG(timePct, ansPct, label) {
+  const s = 92, rO = 33, rI = 21, w = 9;
+  const circ = r => 2 * Math.PI * r;
+  const ring = (r, pct, color, track) => `
+    <circle cx="${s / 2}" cy="${s / 2}" r="${r}" fill="none" stroke="${track}" stroke-width="${w}"/>
+    <circle cx="${s / 2}" cy="${s / 2}" r="${r}" fill="none" stroke="${color}" stroke-width="${w}"
+      stroke-dasharray="${circ(r)}" stroke-dashoffset="${circ(r) * (1 - Math.min(1, Math.max(0, pct)))}"
+      transform="rotate(-90 ${s / 2} ${s / 2})"/>`;
+  return `<svg viewBox="0 0 ${s} ${s}" width="${s}" height="${s}" aria-label="時間と回答状況">
+    ${ring(rO, timePct, '#2f9e57', '#dde3e9')}
+    ${ring(rI, ansPct, '#3a78c9', '#e9eef3')}
+    <text x="50%" y="44%" text-anchor="middle" font-size="8.5" font-weight="700" fill="#556677">回答状況</text>
+    <text x="50%" y="63%" text-anchor="middle" font-size="12" font-weight="800" fill="#222f3d">${label}</text>
+  </svg>`;
+}
+
+function estTotalSec() { return quiz.list.reduce((s, q) => s + q.t, 0); }
+
 function renderQuestion() {
   clearInterval(quiz.timer);
   const q = quiz.list[quiz.i];
@@ -493,29 +514,46 @@ function renderQuestion() {
   const order = shuffle(q.ch.map((_, i) => i));
   quiz.order = order;
 
+  // 1行目が指示文なら上部のグレー帯に分離（実機の指示文バーを再現）
+  let instr = 'つぎの問いに答えなさい。';
+  let body = q.q;
+  const nl = q.q.indexOf('\n');
+  if (nl > 0 && /(選びなさい|答えなさい)。$/.test(q.q.slice(0, nl))) {
+    instr = q.q.slice(0, nl);
+    body = q.q.slice(nl + 1);
+  }
+
   $('#quiz-body').innerHTML = `
   <div class="tc">
-    <div class="tc-header">
+    <div class="tc-topbar">
       <button class="tc-quit" id="quiz-exit">✕ 中断</button>
-      <span class="tc-title">${quiz.mock ? '模擬検査' : '練習検査'}（テストセンター再現）</span>
-      <div class="tc-overall">
-        <span>経過時間 <b id="tc-elapsed">${fmtElapsed(Date.now() - quiz.startT)}</b></span>
-        <span>回答状況 <b>${quiz.i} / ${quiz.list.length}</b></span>
-      </div>
+      <span class="tc-mode">${quiz.mock ? '模擬検査（テストセンター再現）' : `練習検査 ・ ${cat.name}（書籍${cat.pages}）`}</span>
     </div>
-    <div class="tc-main">
-      <div class="tc-tabs">
-        <span class="tc-tab on">1/1</span>
-        <span class="tc-qnum">問${quiz.i + 1}</span>
-        ${quiz.mock ? '' : `<span class="tc-cat">${cat.name}（書籍${cat.pages}）</span>`}
+    <div class="tc-scroll">
+      <div class="tc-top">
+        <div class="tc-instr">${escapeHtml(instr)}</div>
+        <div class="tc-clock">
+          <span class="tc-clock-cap">時間</span>
+          <div id="tc-clock">${tcClockSVG(0, quiz.i / quiz.list.length, `${quiz.i}/${quiz.list.length}`)}</div>
+        </div>
       </div>
-      <div class="tc-panel">
-        <div class="tc-qtext">${escapeHtml(q.q)}</div>
-        <div class="tc-choices" id="choices">${order.map(oi => `
-          <div class="tc-choice" data-oi="${oi}" role="radio" aria-checked="false" tabindex="0">
-            <span class="tc-radio"></span>
-            <span class="tc-choice-text">${escapeHtml(q.ch[oi])}</span>
-          </div>`).join('')}
+      <div class="tc-body">
+        <div class="tc-qcol">
+          <div class="tc-qnum">問${quiz.i + 1}</div>
+          <div class="tc-qtext">${escapeHtml(body)}</div>
+        </div>
+        <div class="tc-acol">
+          <div class="tc-apanel">
+            <div class="tc-ahead">次のAから${'ABCDE'[q.ch.length - 1]}の中から正しいものを1つ選びなさい。</div>
+            <div class="tc-choices" id="choices">${order.map((oi, i) => `
+              <div class="tc-choice" data-oi="${oi}" role="radio" aria-checked="false" tabindex="0">
+                <span class="tc-radio"></span>
+                <span class="tc-letter">${'ABCDE'[i]}</span>
+                <span class="tc-choice-text">${escapeHtml(q.ch[oi])}</span>
+              </div>`).join('')}
+            </div>
+            <div class="tc-tabstrip"><span class="tc-tab on">1</span></div>
+          </div>
         </div>
       </div>
       <div id="exp-slot"></div>
@@ -525,7 +563,7 @@ function renderQuestion() {
         <span class="tc-time-label">回答時間</span>
         <div class="tc-gauge" id="tc-gauge">${Array.from({ length: GAUGE_CELLS }, (_, i) => `<i class="z-${gaugeZone(i)}"></i>`).join('')}</div>
       </div>
-      <button class="tc-next" id="btn-next" disabled>次へ&ensp;▶</button>
+      <button class="tc-next" id="btn-next" disabled>次へ</button>
     </div>
   </div>`;
 
@@ -537,9 +575,11 @@ function renderQuestion() {
   });
 
   const cells = $$('#tc-gauge i');
+  const total = estTotalSec();
   const t0 = Date.now();
   quiz.timer = setInterval(() => {
-    $('#tc-elapsed').textContent = fmtElapsed(Date.now() - quiz.startT);
+    const sessionElapsed = (Date.now() - quiz.startT) / 1000;
+    $('#tc-clock').innerHTML = tcClockSVG(sessionElapsed / total, quiz.i / quiz.list.length, `${quiz.i}/${quiz.list.length}`);
     const elapsed = (Date.now() - t0) / 1000;
     const on = Math.min(GAUGE_CELLS, Math.floor(elapsed / q.t * GAUGE_CELLS));
     cells.forEach((c, i) => c.classList.toggle('on', i < on));
