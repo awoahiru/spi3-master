@@ -1,0 +1,13 @@
+{
+  "name": "SPI3 マスター",
+  "short_name": "SPI3",
+  "description": "群馬県職員採用試験（社会人経験者）第1次試験 SPI3 テストセンター対策アプリ",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#0a84ff",
+  "theme_color": "#0a84ff",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
