@@ -5,6 +5,11 @@
 
 ## 使い方
 
+### どこからでも使う（推奨）
+**https://awoahiru.github.io/spi3-master/**
+iPhoneのSafariで開き、共有ボタン →「**ホーム画面に追加**」でアプリ化。外出先でも使えます。
+（GitHub Pagesで公開。ファイルを変更したら `git add -A && git commit && git push` で自動反映）
+
 ### Macで使う
 `start.command` をダブルクリック → ブラウザが自動で開きます。
 （初回に「開発元が未確認」と出たら、右クリック→「開く」）
