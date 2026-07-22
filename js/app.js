@@ -210,7 +210,63 @@ function showPage(name) {
 /* ===========================================================
    ホーム
    =========================================================== */
+/* ---- カレンダー ---- */
+let calMonth = null; // 'YYYY-MM'
+const monthShift = (m, n) => { const [y, mo] = m.split('-').map(Number); const d = new Date(y, mo - 1 + n, 1); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`; };
+
+function renderCalendar() {
+  const map = {};
+  for (const d of PLAN) map[ds(d.date)] = d;
+  const minM = state.planStart.slice(0, 7);
+  const maxM = state.examDate.slice(0, 7);
+  if (!calMonth) calMonth = ds(today()).slice(0, 7);
+  if (calMonth < minM) calMonth = minM;
+  if (calMonth > maxM) calMonth = maxM;
+  const [y, mo] = calMonth.split('-').map(Number);
+  const startDow = new Date(y, mo - 1, 1).getDay();
+  const daysInM = new Date(y, mo, 0).getDate();
+  const tk = ds(today());
+  let cells = '';
+  for (let i = 0; i < startDow; i++) cells += '<div class="cal-cell empty"></div>';
+  for (let d = 1; d <= daysInM; d++) {
+    const k = ds(new Date(y, mo - 1, d));
+    const pd = map[k];
+    let cls = '', mark = '';
+    if (k === state.examDate) { cls = 'exam'; mark = '🚩'; }
+    else if (pd) {
+      cls = pd.buffer ? 'buf' : 'p' + pd.phase;
+      if (!pd.buffer && pd.tasks.length && pd.tasks.every(t => state.done[t.id])) mark = '✓';
+    }
+    cells += `<button class="cal-cell ${cls} ${k === tk ? 'today' : ''}" data-date="${k}"><span class="n">${d}</span><span class="m">${mark}</span></button>`;
+  }
+  $('#calendar').innerHTML = `
+    <div class="cal-nav">
+      <button class="cal-arrow" id="cal-prev" ${calMonth <= minM ? 'disabled' : ''}>‹</button>
+      <span class="cal-month">${y}年${mo}月</span>
+      <button class="cal-arrow" id="cal-next" ${calMonth >= maxM ? 'disabled' : ''}>›</button>
+    </div>
+    <div class="cal-grid cal-dow"><div class="sun">日</div><div>月</div><div>火</div><div>水</div><div>木</div><div>金</div><div class="sat">土</div></div>
+    <div class="cal-grid">${cells}</div>
+    <div class="cal-legend">
+      <span><i class="lg p1"></i>1周目</span><span><i class="lg p2"></i>2周目</span>
+      <span><i class="lg p3"></i>実戦</span><span><i class="lg p4"></i>直前</span>
+      <span><i class="lg buf"></i>予備日</span><span><i class="lg exam"></i>試験日</span>
+    </div>`;
+  $('#cal-prev').addEventListener('click', () => { calMonth = monthShift(calMonth, -1); renderCalendar(); });
+  $('#cal-next').addEventListener('click', () => { calMonth = monthShift(calMonth, 1); renderCalendar(); });
+  $$('#calendar .cal-cell[data-date]').forEach(c => c.addEventListener('click', () => {
+    const k = c.dataset.date;
+    if (!map[k]) return;
+    showPage('plan');
+    requestAnimationFrame(() => {
+      const el = document.getElementById('plan-day-' + k);
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+  }));
+}
+
 function renderHome() {
+  renderCalendar();
   const exam = parseDs(state.examDate);
   const t = today();
   const daysLeft = Math.round((exam - t) / 86400000);
@@ -323,7 +379,7 @@ function renderPlan() {
     }
     const incomplete = day.tasks.some(t => !state.done[t.id]);
     const totalMin = day.tasks.reduce((s, t) => s + (t.min || 0), 0);
-    html += `<div class="card day-card ${isToday ? 'today-card' : ''} ${isPast && incomplete ? 'past-incomplete' : ''}" ${isToday ? 'id="plan-today"' : ''}>
+    html += `<div class="card day-card ${isToday ? 'today-card' : ''} ${isPast && incomplete ? 'past-incomplete' : ''}" id="plan-day-${k}">
       <div class="day-head">
         <div class="day-date">${day.date.getMonth() + 1}/${day.date.getDate()}<span class="dow ${dow === 0 ? 'sun' : dow === 6 ? 'sat' : ''}">（${DOW[dow]}）</span>${isToday ? ' <span class="badge b-blue">今日</span>' : ''}</div>
         <div class="day-total">計 約${totalMin}分</div>
@@ -409,13 +465,21 @@ function pickQuestions(mode, catId) {
   return [...u, ...d, ...rest].slice(0, 10);
 }
 
-/* ---- クイズ実行 ---- */
-const quiz = { list: [], i: 0, ok: 0, timer: null, left: 0, answered: false, mode: '' };
+/* ---- クイズ実行（テストセンター画面 再現UI） ----
+   実機準拠: 下部に1問ごとの「回答時間」目盛り（緑→黄→オレンジ→赤、
+   赤到達で未回答でも強制的に次へ）、右上に経過時間と回答状況、
+   右下に「次へ」、選択肢はラジオボタン、前の問題には戻れない。
+   模試モードは本番同様フィードバックなし（終了後にまとめて解説）。 */
+const quiz = { list: [], i: 0, ok: 0, timer: null, answered: false, sel: null, mode: '', mock: false, answers: [], startT: 0 };
+
+const GAUGE_CELLS = 20;
+const gaugeZone = i => i < 11 ? 'g' : i < 15 ? 'y' : i < 18 ? 'o' : 'r';
+const fmtElapsed = ms => { const s = Math.floor(ms / 1000); return `${Math.floor(s / 60)}:${pad2(s % 60)}`; };
 
 function startQuiz(mode, catId) {
   const list = pickQuestions(mode, catId);
   if (!list.length) { toast('出題できる問題がありません'); return; }
-  quiz.list = list; quiz.i = 0; quiz.ok = 0; quiz.mode = mode;
+  Object.assign(quiz, { list, i: 0, ok: 0, mode, mock: mode === 'mock', answers: [], answered: false, startT: Date.now() });
   showPage('quiz');
   renderQuestion();
 }
@@ -425,44 +489,76 @@ function renderQuestion() {
   const q = quiz.list[quiz.i];
   const cat = catById(q.c);
   quiz.answered = false;
-  quiz.left = q.t;
-
-  // 選択肢シャッフル
+  quiz.sel = null;
   const order = shuffle(q.ch.map((_, i) => i));
   quiz.order = order;
 
   $('#quiz-body').innerHTML = `
-    <div class="quiz-top">
-      <button class="quiz-exit" id="quiz-exit">✕ 終了</button>
-      <div class="quiz-progress">${quiz.i + 1} / ${quiz.list.length}</div>
+  <div class="tc">
+    <div class="tc-header">
+      <button class="tc-quit" id="quiz-exit">✕ 中断</button>
+      <span class="tc-title">${quiz.mock ? '模擬検査' : '練習検査'}（テストセンター再現）</span>
+      <div class="tc-overall">
+        <span>経過時間 <b id="tc-elapsed">${fmtElapsed(Date.now() - quiz.startT)}</b></span>
+        <span>回答状況 <b>${quiz.i} / ${quiz.list.length}</b></span>
+      </div>
     </div>
-    <div class="timer-track"><div class="timer-bar" id="timer-bar" style="width:100%"></div></div>
-    <div class="q-cat">${cat.icon} ${cat.name}<span style="color:var(--label3)"> ・ 書籍${cat.pages}</span></div>
-    <div class="q-text">${escapeHtml(q.q)}</div>
-    <div id="choices">${order.map((oi, i) => `
-      <button class="choice" data-oi="${oi}">
-        <span class="letter">${'ABCD'[i]}</span><span>${escapeHtml(q.ch[oi])}</span>
-      </button>`).join('')}
+    <div class="tc-main">
+      <div class="tc-tabs">
+        <span class="tc-tab on">1/1</span>
+        <span class="tc-qnum">問${quiz.i + 1}</span>
+        ${quiz.mock ? '' : `<span class="tc-cat">${cat.name}（書籍${cat.pages}）</span>`}
+      </div>
+      <div class="tc-panel">
+        <div class="tc-qtext">${escapeHtml(q.q)}</div>
+        <div class="tc-choices" id="choices">${order.map(oi => `
+          <div class="tc-choice" data-oi="${oi}" role="radio" aria-checked="false" tabindex="0">
+            <span class="tc-radio"></span>
+            <span class="tc-choice-text">${escapeHtml(q.ch[oi])}</span>
+          </div>`).join('')}
+        </div>
+      </div>
+      <div id="exp-slot"></div>
     </div>
-    <div id="exp-slot"></div>
-  `;
-  $('#quiz-exit').addEventListener('click', endQuiz);
-  $$('#choices .choice').forEach(b => b.addEventListener('click', () => answer(Number(b.dataset.oi))));
+    <div class="tc-bottom">
+      <div class="tc-timebox">
+        <span class="tc-time-label">回答時間</span>
+        <div class="tc-gauge" id="tc-gauge">${Array.from({ length: GAUGE_CELLS }, (_, i) => `<i class="z-${gaugeZone(i)}"></i>`).join('')}</div>
+      </div>
+      <button class="tc-next" id="btn-next" disabled>次へ&ensp;▶</button>
+    </div>
+  </div>`;
 
-  const bar = $('#timer-bar');
+  $('#quiz-exit').addEventListener('click', endQuiz);
+  $$('#choices .tc-choice').forEach(el => el.addEventListener('click', () => selectChoice(el)));
+  $('#btn-next').addEventListener('click', () => {
+    if (!quiz.answered) submitAnswer(quiz.sel, false);
+    else advance();
+  });
+
+  const cells = $$('#tc-gauge i');
   const t0 = Date.now();
   quiz.timer = setInterval(() => {
+    $('#tc-elapsed').textContent = fmtElapsed(Date.now() - quiz.startT);
     const elapsed = (Date.now() - t0) / 1000;
-    quiz.left = q.t - elapsed;
-    const r = Math.max(0, quiz.left / q.t);
-    bar.style.width = (r * 100) + '%';
-    bar.classList.toggle('warn', r < 0.5 && r >= 0.25);
-    bar.classList.toggle('danger', r < 0.25);
-    if (quiz.left <= 0) { answer(-1); }
-  }, 250);
+    const on = Math.min(GAUGE_CELLS, Math.floor(elapsed / q.t * GAUGE_CELLS));
+    cells.forEach((c, i) => c.classList.toggle('on', i < on));
+    if (elapsed >= q.t) submitAnswer(null, true);
+  }, 200);
 }
 
-function answer(oi) {
+function selectChoice(el) {
+  if (quiz.answered) return;
+  quiz.sel = Number(el.dataset.oi);
+  $$('#choices .tc-choice').forEach(c => {
+    const sel = c === el;
+    c.classList.toggle('sel', sel);
+    c.setAttribute('aria-checked', sel);
+  });
+  $('#btn-next').disabled = false;
+}
+
+function submitAnswer(oi, timeout) {
   if (quiz.answered) return;
   quiz.answered = true;
   clearInterval(quiz.timer);
@@ -472,30 +568,34 @@ function answer(oi) {
   updateSRS(q.id, correct);
   markActivity();
   save();
+  quiz.answers.push({ oi, correct, timeout });
 
-  $$('#choices .choice').forEach(b => {
-    const bi = Number(b.dataset.oi);
-    b.disabled = true;
-    if (bi === q.a) b.classList.add('correct');
-    else if (bi === oi) b.classList.add('wrong');
-    else b.classList.add('dim');
+  if (quiz.mock) { advance(); return; }
+
+  // 練習モード: その場でフィードバック
+  $$('#choices .tc-choice').forEach(c => {
+    const ci = Number(c.dataset.oi);
+    c.classList.add('locked');
+    if (ci === q.a) c.classList.add('correct');
+    else if (ci === oi) c.classList.add('wrong');
+    else c.classList.add('dim');
   });
-
-  const timeout = oi === -1;
   $('#exp-slot').innerHTML = `
-    <div class="exp-card">
-      <div class="exp-head ${correct ? 'ok' : 'ng'}">${correct ? '✅ 正解！ +10 XP' : timeout ? '⏰ 時間切れ' : '❌ 不正解'}</div>
-      <div class="exp-body">${escapeHtml(q.e)}</div>
-      <div class="exp-time">この問題の目安時間: ${q.t}秒 ${correct ? '' : '｜復習キューに追加されました'}</div>
-    </div>
-    <button class="btn" id="btn-next">${quiz.i + 1 < quiz.list.length ? '次の問題 →' : '結果を見る'}</button>
-  `;
-  $('#btn-next').addEventListener('click', () => {
-    quiz.i++;
-    if (quiz.i < quiz.list.length) renderQuestion();
-    else showResult();
-  });
-  $('#btn-next').scrollIntoView({ behavior: 'smooth', block: 'end' });
+    <div class="tc-exp ${correct ? 'ok' : 'ng'}">
+      <div class="tc-exp-head">${correct ? '✅ 正解！ +10 XP' : timeout ? '⏰ 時間切れ — 本番ではここで強制的に次へ進みます' : '❌ 不正解'}</div>
+      <div class="tc-exp-body">${escapeHtml(q.e)}</div>
+      <div class="tc-exp-meta">目安時間 ${q.t}秒${correct ? '' : '｜復習キューに追加されました'}</div>
+    </div>`;
+  const btn = $('#btn-next');
+  btn.disabled = false;
+  btn.textContent = quiz.i + 1 < quiz.list.length ? '次の問題　▶' : '結果を見る';
+  $('#exp-slot').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function advance() {
+  quiz.i++;
+  if (quiz.i < quiz.list.length) renderQuestion();
+  else showResult();
 }
 
 function updateSRS(qid, correct) {
@@ -518,24 +618,44 @@ function showResult() {
   save();
   const n = quiz.list.length;
   const pct = Math.round((quiz.ok / n) * 100);
+  const elapsed = fmtElapsed(Date.now() - quiz.startT);
   const emoji = pct >= 90 ? '🏆' : pct >= 70 ? '🎉' : pct >= 50 ? '💪' : '📖';
   const msg = pct >= 90 ? '素晴らしい！本番レベルの仕上がり'
     : pct >= 70 ? 'いい調子！間違えた問題だけ復習しよう'
     : pct >= 50 ? '解説の速解法を意識してもう一周'
     : '大丈夫、間違いは伸びしろ。解説をじっくり読もう';
+
+  // 模試モードは本番同様、終了後にまとめて振り返り
+  const review = quiz.mock ? quiz.answers.map((ans, idx) => {
+    const q = quiz.list[idx];
+    const cat = catById(q.c);
+    return `<div class="card" style="padding:14px">
+      <div style="font-size:13px;font-weight:800;color:${ans.correct ? 'var(--green)' : 'var(--red)'}">
+        問${idx + 1}　${ans.correct ? '○ 正解' : ans.timeout ? '⏰ 時間切れ' : '✕ 不正解'}　<span style="color:var(--label3)">${cat.icon} ${cat.name}・書籍${cat.pages}</span>
+      </div>
+      <div style="font-size:14px;font-weight:700;margin:6px 0;white-space:pre-wrap">${escapeHtml(q.q)}</div>
+      <div style="font-size:13.5px"><b>正解:</b> ${escapeHtml(q.ch[q.a])}${!ans.correct && ans.oi != null ? `<br><b>あなたの回答:</b> ${escapeHtml(q.ch[ans.oi])}` : ''}</div>
+      <details style="margin-top:6px"><summary style="font-size:13px;color:var(--blue);font-weight:700;cursor:pointer">解説を見る</summary>
+        <div style="font-size:13.5px;white-space:pre-wrap;margin-top:6px;line-height:1.7">${escapeHtml(q.e)}</div>
+      </details>
+    </div>`;
+  }).join('') : '';
+
   $('#quiz-body').innerHTML = `
     <div class="result-hero">
       <div class="r-emoji">${emoji}</div>
       <div class="r-score">${quiz.ok} / ${n} 問正解</div>
-      <div class="r-msg">${msg}（+${quiz.ok * 10} XP）</div>
+      <div class="r-msg">${msg}（+${quiz.ok * 10} XP・所要 ${elapsed}）</div>
     </div>
-    <div class="btn-row" style="margin-top:14px">
+    <div class="btn-row" style="margin:14px 0 ${review ? '20px' : '0'}">
       <button class="btn secondary" id="btn-again">もう一度</button>
       <button class="btn" id="btn-done">ドリルに戻る</button>
     </div>
+    ${review ? `<div class="card-title" style="margin:6px 2px 10px">振り返り（本番では見られません。ここで差をつけよう）</div>${review}` : ''}
   `;
   $('#btn-again').addEventListener('click', () => startQuiz(quiz.mode, quiz.list[0].c));
   $('#btn-done').addEventListener('click', () => showPage('drill'));
+  window.scrollTo(0, 0);
 }
 
 function endQuiz() {
@@ -660,7 +780,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // プラン
   $('#btn-goto-today').addEventListener('click', () => {
-    const el = $('#plan-today');
+    const el = $('.today-card');
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     else toast('今日は予備日です');
   });
